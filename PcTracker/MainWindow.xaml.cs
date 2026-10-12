@@ -17,7 +17,7 @@ namespace PcTracker
         private string selectedUser = "";
         private string userType = "";
 
-        private readonly string botToken = "8971048145:AAGOf4JZI-o0dvYw74eG_5b7iMPInRX9s3c";
+        //private readonly string botToken = "8971048145:AAGOf4JZI-o0dvYw74eG_5b7iMPInRX9s3c";
         private readonly string chatId = "5715963346";
         private TelegramBotClient botClient;
         private CancellationTokenSource cts = new CancellationTokenSource();
@@ -30,19 +30,36 @@ namespace PcTracker
         private long aktifOturumId = 0;
         private DispatcherTimer oyunSayaci;
         private int kalanDakika = 0;
+        private string botToken = "";
 
         public MainWindow()
         {
             InitializeComponent();
-            SetupTrayIcon();
 
-            // 1. Veritabanını hazırla (Tablo yoksa oluşturur)
+            // Loglama Sistemini Başlat
+            Logger.Baslat();
+            Logger.Yaz("Uygulama başlatıldı.");
+
+            // Token'ı dosyadan oku
+            string configPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.txt");
+            if (System.IO.File.Exists(configPath))
+            {
+                botToken = System.IO.File.ReadAllText(configPath).Trim();
+            }
+            else
+            {
+                System.Windows.MessageBox.Show("HATA: config.txt dosyası bulunamadı! Lütfen exe'nin yanına config.txt oluşturup içine bot token'ını yazın.");
+                Logger.Yaz("HATA: config.txt bulunamadı.");
+                System.Windows.Application.Current.Shutdown();
+                return;
+            }
+
+            SetupTrayIcon();
             DbHelper.InitializeDatabase();
 
             botClient = new TelegramBotClient(botToken);
             StartTelegramListener();
 
-            // Uygulama kapanırken veya bilgisayar kapatılırken süreyi hesapla
             System.Windows.Application.Current.Exit += App_Exit;
             Microsoft.Win32.SystemEvents.SessionEnding += SystemEvents_SessionEnding;
         }
