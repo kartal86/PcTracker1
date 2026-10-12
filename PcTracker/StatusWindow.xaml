@@ -1,0 +1,21 @@
+﻿<Window x:Class="PcTracker.StatusWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Durum Bilgisi" Height="200" Width="350"
+        WindowStyle="None" AllowsTransparency="True" Background="Transparent"
+        WindowStartupLocation="CenterScreen" Topmost="True">
+
+    <Border CornerRadius="15" Background="#1E1E24" BorderBrush="#FFD700" BorderThickness="1">
+        <Border.Effect>
+            <DropShadowEffect Color="Black" BlurRadius="20" ShadowDepth="5" Opacity="0.7"/>
+        </Border.Effect>
+
+        <StackPanel VerticalAlignment="Center" Margin="20">
+            <TextBlock x:Name="TxtTitle" Text="SİSTEM DURUMU" Foreground="#00FFFF" FontSize="18" FontWeight="Bold" HorizontalAlignment="Center" Margin="0,0,0,15"/>
+            <TextBlock x:Name="TxtMessage" Text="Mesaj buraya gelecek..." Foreground="White" FontSize="16" HorizontalAlignment="Center" Margin="0,0,0,20" TextWrapping="Wrap" TextAlignment="Center"/>
+
+            <Button Content="TAMAM" Width="100" Height="35" FontSize="14" FontWeight="Bold" 
+                    Background="#D90429" Foreground="White" Click="BtnOk_Click"/>
+        </StackPanel>
+    </Border>
+</Window>
