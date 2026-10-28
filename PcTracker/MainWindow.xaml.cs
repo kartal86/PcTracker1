@@ -1,10 +1,11 @@
 ﻿using System;
+using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
-using System.Windows.Threading; // Sayaç için eklendi
+using System.Windows.Threading;
 using Telegram.Bot;
 using Telegram.Bot.Polling;
 using Telegram.Bot.Types;
@@ -17,38 +18,44 @@ namespace PcTracker
         private string selectedUser = "";
         private string userType = "";
 
-        //private readonly string botToken = "8971048145:AAGOf4JZI-o0dvYw74eG_5b7iMPInRX9s3c";
         private readonly string chatId = "5715963346";
         private TelegramBotClient botClient;
         private CancellationTokenSource cts = new CancellationTokenSource();
 
-        private bool isTestMode = true;
         private System.Windows.Forms.NotifyIcon trayIcon;
 
         // VERİ TABANI VE SAYAÇ DEĞİŞKENLERİ
         private DateTime girisZamani;
+        private DateTime bitisZamani;
         private long aktifOturumId = 0;
         private DispatcherTimer oyunSayaci;
-        private int kalanDakika = 0;
         private string botToken = "";
+
+        // SPAM ENGELLEYİCİ DURUM BAYRAKLARI
+        private bool bildirim30Dk = false;
+        private bool bildirim5Dk = false;
+        private bool kilitlendi = false;
 
         public MainWindow()
         {
             InitializeComponent();
 
-            // Loglama Sistemini Başlat
+            System.Windows.Application.Current.Dispatcher.Invoke(() => this.Visibility = Visibility.Visible);
+            ResetUI();
+
             Logger.Baslat();
             Logger.Yaz("Uygulama başlatıldı.");
 
-            // Token'ı dosyadan oku
-            string configPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.txt");
+            string baseDir = System.IO.Path.GetDirectoryName(Environment.ProcessPath);
+            string configPath = System.IO.Path.Combine(baseDir, "config.txt");
+
             if (System.IO.File.Exists(configPath))
             {
                 botToken = System.IO.File.ReadAllText(configPath).Trim();
             }
             else
             {
-                System.Windows.MessageBox.Show("HATA: config.txt dosyası bulunamadı! Lütfen exe'nin yanına config.txt oluşturup içine bot token'ını yazın.");
+                System.Windows.MessageBox.Show("HATA: config.txt dosyası bulunamadı!");
                 Logger.Yaz("HATA: config.txt bulunamadı.");
                 System.Windows.Application.Current.Shutdown();
                 return;
@@ -64,21 +71,39 @@ namespace PcTracker
             Microsoft.Win32.SystemEvents.SessionEnding += SystemEvents_SessionEnding;
         }
 
+        private void ResetUI()
+        {
+            selectedUser = "";
+            userType = "";
+            BtnStart.Visibility = Visibility.Hidden;
+            PanelTime.Visibility = Visibility.Hidden;
+
+            var converter = new BrushConverter();
+
+            BtnHalil.Background = (System.Windows.Media.Brush)converter.ConvertFromString("#2B2D42");
+            BtnIbrahim.Background = (System.Windows.Media.Brush)converter.ConvertFromString("#2B2D42");
+            BtnAhmet.Background = (System.Windows.Media.Brush)converter.ConvertFromString("#2B2D42");
+            BtnIsmail.Background = (System.Windows.Media.Brush)converter.ConvertFromString("#2B2D42");
+        }
+
         private void SetupTrayIcon()
         {
             trayIcon = new System.Windows.Forms.NotifyIcon();
             trayIcon.Icon = System.Drawing.SystemIcons.Shield;
-            trayIcon.Text = "PC Tracker - Arka Planda Çalışıyor";
+            trayIcon.Text = "PC Tracker";
             trayIcon.Visible = false;
 
             var menu = new System.Windows.Forms.ContextMenuStrip();
+
+            // 1. MEVCUT MENÜ: KALAN SÜREYİ GÖSTER
             menu.Items.Add("Kalan Süremi Göster", null, (s, e) => {
-                // Tray icon arka plan thread'inde çalıştığı için WPF arayüzünü Dispatcher ile çağırıyoruz
                 System.Windows.Application.Current.Dispatcher.Invoke(() =>
                 {
                     if (userType == "User")
                     {
-                        StatusWindow status = new StatusWindow($"Kullanıcı: {selectedUser} \n\nKalan Süreniz: {kalanDakika} Dakika");
+                        int kalanDk = (int)(bitisZamani - DateTime.Now).TotalMinutes;
+                        if (kalanDk < 0) kalanDk = 0;
+                        StatusWindow status = new StatusWindow($"Kullanıcı: {selectedUser} \n\nKalan Süreniz: {kalanDk} Dakika");
                         status.ShowDialog();
                     }
                     else
@@ -88,6 +113,54 @@ namespace PcTracker
                     }
                 });
             });
+
+            // 2. YENİ EKLENTİ: YÖNETİCİYE MESAJ GÖNDER
+            menu.Items.Add("Yöneticiye Mesaj Gönder", null, (s, e) => {
+                System.Windows.Application.Current.Dispatcher.Invoke(() =>
+                {
+                    // Kullanıcıdan mesaj almak için küçük bir input penceresi (InputWindow) açıyoruz
+                    InputWindow inputWindow = new InputWindow("Yöneticiye iletilecek mesajı girin:");
+                    if (inputWindow.ShowDialog() == true)
+                    {
+                        string gonderilecekMesaj = inputWindow.Answer;
+                        if (!string.IsNullOrWhiteSpace(gonderilecekMesaj))
+                        {
+                            try
+                            {
+                                botClient.SendMessage(chatId, $"📨 **{selectedUser}'den Mesaj:**\n\n{gonderilecekMesaj}", parseMode: ParseMode.Markdown).Wait();
+                                System.Windows.MessageBox.Show("Mesajınız yöneticiye başarıyla iletildi.", "Başarılı", MessageBoxButton.OK, MessageBoxImage.Information);
+                            }
+                            catch (Exception ex)
+                            {
+                                System.Windows.MessageBox.Show("Mesaj gönderilirken bir hata oluştu.", "Hata", MessageBoxButton.OK, MessageBoxImage.Error);
+                                Logger.HataYaz(ex);
+                            }
+                        }
+                    }
+                });
+            });
+
+            // 3. YENİ EKLENTİ: KULLANICI DEĞİŞTİR (OTURUM DEVRİ)
+            menu.Items.Add("Kullanıcı Değiştir", null, (s, e) => {
+                System.Windows.Application.Current.Dispatcher.Invoke(() =>
+                {
+                    if (string.IsNullOrEmpty(selectedUser)) return;
+
+                    MessageBoxResult result = System.Windows.MessageBox.Show($"Şu an {selectedUser} oturumu aktif.\nOturumu kapatıp yeni bir kullanıcı seçmek istiyor musunuz?", "Kullanıcı Değişikliği", MessageBoxButton.YesNo, MessageBoxImage.Question);
+
+                    if (result == MessageBoxResult.Yes)
+                    {
+                        // 1. Telegram'a çıkış bilgisini ve süreyi gönder
+                        SendLogoutMessage();
+
+                        // 2. Arayüzü sıfırla ve Ana Ekranı geri getir
+                        ResetUI();
+                        trayIcon.Visible = false;
+                        this.Show();
+                    }
+                });
+            });
+
             trayIcon.ContextMenuStrip = menu;
         }
 
@@ -97,24 +170,27 @@ namespace PcTracker
             selectedUser = clickedButton.Content.ToString().Replace("👑 ", "").Replace("🎮 ", "");
             userType = clickedButton.Tag.ToString();
 
-            BtnHalil.Background = new SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString("#2B2D42"));
-            BtnIbrahim.Background = new SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString("#2B2D42"));
-            BtnAhmet.Background = new SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString("#2B2D42"));
-            BtnIsmail.Background = new SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString("#2B2D42"));
-            clickedButton.Background = new SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString("#8D99AE"));
+            var converter = new BrushConverter();
+
+            BtnHalil.Background = (System.Windows.Media.Brush)converter.ConvertFromString("#2B2D42");
+            BtnIbrahim.Background = (System.Windows.Media.Brush)converter.ConvertFromString("#2B2D42");
+            BtnAhmet.Background = (System.Windows.Media.Brush)converter.ConvertFromString("#2B2D42");
+            BtnIsmail.Background = (System.Windows.Media.Brush)converter.ConvertFromString("#2B2D42");
+
+            clickedButton.Background = (System.Windows.Media.Brush)converter.ConvertFromString("#8D99AE");
 
             if (userType == "Boss")
             {
                 PanelTime.Visibility = Visibility.Hidden;
                 BtnStart.Content = "YÖNETİCİ GİRİŞİ YAP";
-                BtnStart.Background = new SolidColorBrush(System.Windows.Media.Colors.Green);
+                BtnStart.Background = new SolidColorBrush(Colors.Green);
                 BtnStart.Visibility = Visibility.Visible;
             }
             else
             {
                 PanelTime.Visibility = Visibility.Visible;
                 BtnStart.Content = "OYUNU BAŞLAT";
-                BtnStart.Background = new SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString("#D90429"));
+                BtnStart.Background = (System.Windows.Media.Brush)converter.ConvertFromString("#D90429");
                 BtnStart.Visibility = Visibility.Visible;
             }
         }
@@ -129,56 +205,63 @@ namespace PcTracker
             }
             else
             {
-                double selectedHours = double.Parse(((ComboBoxItem)ComboTime.SelectedItem).Content.ToString());
+                string selectedContent = ((ComboBoxItem)ComboTime.SelectedItem).Content.ToString().Replace(",", ".");
+                double selectedHours = double.Parse(selectedContent, CultureInfo.InvariantCulture);
+
                 int izinDakika = (int)(selectedHours * 60);
-                kalanDakika = izinDakika;
 
-                // 2. DB'ye yeni oturumu kaydet ve ID'sini al
-                aktifOturumId = DbHelper.YeniOturumBaslat(selectedUser, izinDakika);
                 girisZamani = DateTime.Now;
+                bitisZamani = girisZamani.AddMinutes(izinDakika);
 
-                await botClient.SendMessage(chatId, $"🎮 {selectedUser} pc başında {selectedHours} saat ({izinDakika} dk) süre ile açtı.");
+                bildirim30Dk = false;
+                bildirim5Dk = false;
+                kilitlendi = false;
+
+                aktifOturumId = DbHelper.YeniOturumBaslat(selectedUser, izinDakika);
+
+                try
+                {
+                    await botClient.SendMessage(chatId, $"🎮 {selectedUser} pc başında {selectedHours} saat ({izinDakika} dk) süre ile açtı.");
+                }
+                catch { }
 
                 this.Hide();
                 trayIcon.Visible = true;
 
-                // 3. Arka plan geri sayım sayacını başlat
                 BaslatSayac();
-
-                if (isTestMode)
-                {
-                    GosterOyunIciUyari($"TEST: {selectedUser}, {selectedHours} saatlik süren başladı!");
-                }
             }
         }
 
-        // --- SAYAC VE UYARI SİSTEMİ ---
         private void BaslatSayac()
         {
+            if (oyunSayaci != null) oyunSayaci.Stop();
+
             oyunSayaci = new DispatcherTimer();
-            oyunSayaci.Interval = TimeSpan.FromMinutes(1); // Her 1 dakikada bir çalışır
+            oyunSayaci.Interval = TimeSpan.FromSeconds(10);
             oyunSayaci.Tick += (s, ev) =>
             {
-                kalanDakika--;
+                TimeSpan kalanSure = bitisZamani - DateTime.Now;
+                double kalanDakika = kalanSure.TotalMinutes;
 
-                int yariSure = (int)(DateTime.Now - girisZamani).TotalMinutes; // İznin yarısı falan hesaplanabilir
-
-                if (kalanDakika == 30)
+                if (kalanDakika <= 30 && kalanDakika > 29 && !bildirim30Dk)
                 {
+                    bildirim30Dk = true;
                     GosterOyunIciUyari("Yarım saatiniz kaldı.");
                 }
-                else if (kalanDakika == 5)
+                else if (kalanDakika <= 5 && kalanDakika > 0 && !bildirim5Dk)
                 {
+                    bildirim5Dk = true;
                     GosterOyunIciUyari("🚨 DİKKAT: Son 5 dakikan! Lütfen oyununu kaydet veya maçı bitir.");
                     botClient.SendMessage(chatId, $"⚠️ {selectedUser} için oyun süresinin bitimine SON 5 DAKİKA kaldı!");
                 }
-                else if (kalanDakika <= 0)
+                else if (kalanDakika <= 0 && !kilitlendi)
                 {
+                    kilitlendi = true;
                     oyunSayaci.Stop();
+
                     GosterOyunIciUyari("SÜREN BİTTİ! Sistem kilitleniyor...");
                     botClient.SendMessage(chatId, $"🔒 {selectedUser} süresini doldurdu. Sistem kilitlendi.");
 
-                    // Windows'u Kilitle
                     System.Diagnostics.Process.Start("rundll32.exe", "user32.dll,LockWorkStation");
                 }
             };
@@ -187,11 +270,15 @@ namespace PcTracker
 
         private void GosterOyunIciUyari(string mesaj)
         {
+            foreach (Window window in System.Windows.Application.Current.Windows)
+            {
+                if (window is OverlayWindow) window.Close();
+            }
+
             OverlayWindow overlay = new OverlayWindow($"💬 SİSTEM UYARISI:\n{mesaj}");
             overlay.Show();
         }
 
-        // --- ÇIKIŞ VE VERİ TABANI KAYIT İŞLEMLERİ ---
         private void App_Exit(object sender, ExitEventArgs e)
         {
             SendLogoutMessage();
@@ -206,7 +293,7 @@ namespace PcTracker
         {
             if (userType == "User" && !string.IsNullOrEmpty(selectedUser) && aktifOturumId > 0)
             {
-                // DB'de oturumu kapat ve süreyi güncelle
+                oyunSayaci?.Stop();
                 DbHelper.OturumKapat(aktifOturumId);
 
                 TimeSpan oynananSure = DateTime.Now - girisZamani;
@@ -214,26 +301,19 @@ namespace PcTracker
 
                 try
                 {
-                    botClient.SendMessage(chatId, $"🛑 {selectedUser} bilgisayarı kapattı.\n⏱ Toplam oynama süresi: {sureMetni}").Wait();
+                    botClient.SendMessage(chatId, $"🛑 {selectedUser} bilgisayarı kapattı / oturumu devretti.\n⏱ Toplam oynama süresi: {sureMetni}").Wait();
                 }
                 catch { }
 
-                aktifOturumId = 0; // Aynı kaydı iki kez yapmasını engelle
+                aktifOturumId = 0;
+                selectedUser = "";
             }
         }
 
-        // --- TELEGRAM DİNLEME (Değişiklik Yok) ---
         private void StartTelegramListener()
         {
             var receiverOptions = new ReceiverOptions { AllowedUpdates = Array.Empty<UpdateType>() };
-
-            // Pozisyonel argüman kullanıldı (isimli parametreleri kaldırdık)
-            botClient.StartReceiving(
-                HandleUpdateAsync,
-                HandleErrorAsync,
-                receiverOptions,
-                cts.Token
-            );
+            botClient.StartReceiving(HandleUpdateAsync, HandleErrorAsync, receiverOptions, cts.Token);
         }
 
         private async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update, CancellationToken cancellationToken)
@@ -250,10 +330,14 @@ namespace PcTracker
                 case "/durum":
                     if (userType == "Boss")
                         await botClient.SendMessage(chatId, $"👑 Yönetici ({selectedUser}) sistemde.", cancellationToken: cancellationToken);
-                    else if (string.IsNullOrEmpty(selectedUser))
+                    else if (string.IsNullOrEmpty(selectedUser) || aktifOturumId == 0)
                         await botClient.SendMessage(chatId, "⏳ Bilgisayar bekleme ekranında.", cancellationToken: cancellationToken);
                     else
-                        await botClient.SendMessage(chatId, $"🎮 {selectedUser} sistemde.\n⏱ Kalan Süre: {kalanDakika} Dakika.", cancellationToken: cancellationToken);
+                    {
+                        int kalan = (int)(bitisZamani - DateTime.Now).TotalMinutes;
+                        if (kalan < 0) kalan = 0;
+                        await botClient.SendMessage(chatId, $"🎮 {selectedUser} sistemde.\n⏱ Kalan Süre: {kalan} Dakika.", cancellationToken: cancellationToken);
+                    }
                     break;
 
                 case "/mesaj":
@@ -268,6 +352,64 @@ namespace PcTracker
                 case "/kilitle":
                     await botClient.SendMessage(chatId, "🔒 Bilgisayar anında kilitleniyor...", cancellationToken: cancellationToken);
                     System.Diagnostics.Process.Start("rundll32.exe", "user32.dll,LockWorkStation");
+                    break;
+
+                case "/cikis":
+                    if (!string.IsNullOrEmpty(selectedUser) && userType == "User")
+                    {
+                        await botClient.SendMessage(chatId, $"🔄 {selectedUser} için oturum sonlandırılıyor. Bilgisayar kilitlenecek ve ekran sıfırlanacak.", cancellationToken: cancellationToken);
+
+                        SendLogoutMessage();
+
+                        System.Windows.Application.Current.Dispatcher.Invoke(() =>
+                        {
+                            ResetUI();
+                            trayIcon.Visible = false;
+                            this.Show();
+                            System.Diagnostics.Process.Start("rundll32.exe", "user32.dll,LockWorkStation");
+                        });
+                    }
+                    else
+                    {
+                        await botClient.SendMessage(chatId, "❌ Şu anda kapatılabilecek aktif bir kullanıcı oturumu yok.", cancellationToken: cancellationToken);
+                    }
+                    break;
+
+                case "/sureayar":
+                    if (metinParcalari.Length > 1 && int.TryParse(metinParcalari[1], out int yeniDakika))
+                    {
+                        if (!string.IsNullOrEmpty(selectedUser) && userType == "User")
+                        {
+                            bitisZamani = DateTime.Now.AddMinutes(yeniDakika);
+                            bildirim30Dk = false;
+                            bildirim5Dk = false;
+                            kilitlendi = false;
+                            await botClient.SendMessage(chatId, $"✅ {selectedUser} için kalan süre {yeniDakika} dakika olarak baştan ayarlandı.", cancellationToken: cancellationToken);
+                            System.Windows.Application.Current.Dispatcher.Invoke(() => GosterOyunIciUyari($"Süreniz {yeniDakika} dakika olarak güncellendi."));
+                        }
+                        else { await botClient.SendMessage(chatId, "❌ Şu an aktif bir oyuncu yok.", cancellationToken: cancellationToken); }
+                    }
+                    else { await botClient.SendMessage(chatId, "Kullanım: /sureayar [dakika]", cancellationToken: cancellationToken); }
+                    break;
+
+                case "/sureekle":
+                    if (metinParcalari.Length > 1 && int.TryParse(metinParcalari[1], out int ekleDakika))
+                    {
+                        if (!string.IsNullOrEmpty(selectedUser) && userType == "User")
+                        {
+                            bitisZamani = bitisZamani.AddMinutes(ekleDakika);
+                            kilitlendi = false;
+
+                            int totalKalan = (int)(bitisZamani - DateTime.Now).TotalMinutes;
+                            if (totalKalan > 30) bildirim30Dk = false;
+                            if (totalKalan > 5) bildirim5Dk = false;
+
+                            await botClient.SendMessage(chatId, $"➕ {selectedUser} için süreye {ekleDakika} dk eklendi.\n⏱ Yeni kalan süre: {totalKalan} Dakika.", cancellationToken: cancellationToken);
+                            System.Windows.Application.Current.Dispatcher.Invoke(() => GosterOyunIciUyari($"Sürenize {ekleDakika} dakika EKLENDİ."));
+                        }
+                        else { await botClient.SendMessage(chatId, "❌ Şu an aktif bir oyuncu yok.", cancellationToken: cancellationToken); }
+                    }
+                    else { await botClient.SendMessage(chatId, "Kullanım: /sureekle [dakika]", cancellationToken: cancellationToken); }
                     break;
 
                 case "/ekran":
